@@ -33,3 +33,16 @@ npm run dev
 4. Open the Vite URL (usually http://localhost:5173), tap a mood, get nine cards. Images load one after another so the free image host does not choke.
 
 The Groq key stays in `backend/.env`. The browser never sees it.
+
+## Deploy on Vercel (free)
+
+1. Push this repo to GitHub (do not commit `.env`).
+2. Go to [vercel.com](https://vercel.com), sign in with GitHub, **Add New Project**, import `Anti-DoomScrolling-App`.
+3. Leave the root directory as the repo root. Vercel will use `vercel.json`.
+4. Under **Environment Variables**, add `GROQ_API_KEY` (same value as local `.env`). Apply it to Production, Preview, and Development.
+5. Deploy. The site URL will look like `https://something.vercel.app`.
+6. Open `/api/health` on that domain. `"groq": true` means the key is loaded.
+
+The frontend and API share that domain, so the browser still calls `/api/reset`. The Groq key never ships to the client.
+
+Hobby functions can time out on a slow model. If that happens, the app still shows the nine fallback cards.

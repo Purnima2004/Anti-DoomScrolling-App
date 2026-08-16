@@ -25,7 +25,7 @@ CARD_COUNT = 9
 app = FastAPI(title="Paper Reset")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -151,7 +151,8 @@ async def groq_cards(mood: str) -> list[dict] | None:
         ],
     }
     try:
-        async with httpx.AsyncClient(timeout=90) as client:
+        timeout = 20 if os.getenv("VERCEL") else 90
+        async with httpx.AsyncClient(timeout=timeout) as client:
             r = await client.post(
                 GROQ_URL,
                 headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
@@ -170,11 +171,13 @@ async def groq_cards(mood: str) -> list[dict] | None:
 
 
 @app.get("/api/health")
+@app.get("/health")
 def health():
     return {"ok": True, "groq": bool(os.getenv("GROQ_API_KEY", "").strip())}
 
 
 @app.post("/api/reset")
+@app.post("/reset")
 async def reset(body: ResetIn):
     mood = body.mood.strip()[:80]
     raw = await groq_cards(mood)

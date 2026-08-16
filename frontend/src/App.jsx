@@ -63,7 +63,7 @@ export default function App() {
       const data = await fetchReset(asked);
       setPack(data);
     } catch {
-      setError("The desk is quiet. Is the Python server running on port 8000?");
+      setError("The desk is quiet. Try again in a moment.");
     } finally {
       setLoading(false);
     }
