@@ -2,23 +2,7 @@ import { useEffect, useState } from "react";
 import { fetchReset } from "./api.js";
 
 const MOODS = ["burnt out", "restless", "bored", "foggy", "anxious", "numb"];
-const HISTORY_KEY = "paper-reset-history";
 const DEFAULTS = ["/defaults/window.png", "/defaults/road.png", "/defaults/sky.png"];
-
-function loadHistory() {
-  try {
-    const raw = JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");
-    return Array.isArray(raw) ? raw.slice(0, 3) : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveHistory(entry) {
-  const next = [entry, ...loadHistory().filter((h) => h.at !== entry.at)].slice(0, 3);
-  localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
-  return next;
-}
 
 function Card({ card, index, showImage }) {
   const fallback = DEFAULTS[index % DEFAULTS.length];
@@ -66,7 +50,6 @@ export default function App() {
   const [visible, setVisible] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [history, setHistory] = useState(loadHistory);
 
   const activeMood = custom.trim() || mood;
 
@@ -79,13 +62,6 @@ export default function App() {
     try {
       const data = await fetchReset(asked);
       setPack(data);
-      const titles = data.cards.map((c) => c.title);
-      const entry = {
-        mood: asked,
-        at: Date.now(),
-        titles: titles.length > 3 ? [...titles.slice(0, 3), `+${titles.length - 3} more`] : titles,
-      };
-      setHistory(saveHistory(entry));
     } catch {
       setError("The desk is quiet. Is the Python server running on port 8000?");
     } finally {
@@ -159,20 +135,6 @@ export default function App() {
       ) : (
         <p className="empty">No cards on the desk yet. A mood is enough.</p>
       )}
-
-      {history.length ? (
-        <footer className="drawer">
-          <h3>Last slips</h3>
-          <ul>
-            {history.map((h) => (
-              <li key={h.at}>
-                <em>{h.mood}</em>
-                <span>{h.titles.join(" · ")}</span>
-              </li>
-            ))}
-          </ul>
-        </footer>
-      ) : null}
     </div>
   );
 }
