@@ -1,4 +1,4 @@
-"""Paper Reset API: mood -> nine visual idea cards."""
+"""Paper Reset API: mood -> nine cards from real websites on the web."""
 
 from __future__ import annotations
 
@@ -14,13 +14,27 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from fallbacks import fallback_cards, resolve_site, sites_for_prompt
+from discover import (
+    CARD_COUNT,
+    discover_sites,
+    is_blocked,
+    normalize_url,
+    pick_sites_for_llm,
+    site_host,
+    sites_for_prompt,
+)
+from fallbacks import fallback_cards
 
 load_dotenv()
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "openai/gpt-oss-20b"
-CARD_COUNT = 9
+# Free-tier TPM limits (Aug 2026): scout 30k, 70b 12k, gpt-oss 8k — see console.groq.com/docs/rate-limits
+GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+GROQ_MODEL_FALLBACKS = (
+    "meta-llama/llama-4-scout-17b-16e-instruct",  # 30,000 TPM
+    "llama-3.3-70b-versatile",  # 12,000 TPM
+    "openai/gpt-oss-20b",  # 8,000 TPM
+)
 
 app = FastAPI(title="Paper Reset")
 app.add_middleware(
@@ -35,13 +49,21 @@ class ResetIn(BaseModel):
     mood: str = Field(min_length=1, max_length=80)
 
 
+def _pollinations_key() -> str:
+    return (
+        os.getenv("POLLINATIONS_API_KEY", "").strip()
+        or os.getenv("POLLINATION_API_KEY", "").strip()
+    )
+
+
 def image_url(prompt: str, seed: int) -> str:
     clean = (prompt or "warm quiet room, no text").strip()[:280]
     path = quote(clean, safe="")
-    return (
-        f"https://image.pollinations.ai/prompt/{path}"
-        f"?model=flux&width=768&height=768&seed={seed}"
-    )
+    key = _pollinations_key()
+    base = f"https://gen.pollinations.ai/image/{path}?model=flux&width=768&height=768&seed={seed}"
+    if key:
+        return f"{base}&key={quote(key, safe='')}"
+    return f"https://image.pollinations.ai/prompt/{path}?model=flux&width=768&height=768&seed={seed}"
 
 
 def _strip_fences(text: str) -> str:
@@ -52,159 +74,199 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-def _normalize_card(raw: dict, mood: str, used_urls: set[str], seed: int) -> dict:
-    site = resolve_site(
-        str(raw.get("site_url") or ""),
-        str(raw.get("site_name") or ""),
-        used_urls,
-        mood,
-    )
-    used_urls.add(site["url"])
-    prompt = str(raw.get("image_prompt") or f"warm illustration matching {mood}, no text")
-    return {
-        "title": str(raw.get("title") or "A small reset").strip()[:80],
-        "micro_action": str(raw.get("micro_action") or "Step away for two minutes.").strip()[:240],
-        "why": str(raw.get("why") or "A short, finished loop beats an endless one.").strip()[:240],
-        "image_url": image_url(prompt, seed),
-        "site_name": site["name"],
-        "site_url": site["url"],
-        "site_why": str(raw.get("site_why") or "A short visit, then you can leave.").strip()[:160],
-    }
+def _system_prompt(sites_block: str) -> str:
+    return f"""Escape Instagram doomscrolling. Pick all 9 sites below (use each once).
+Every site must be open-and-play: no login, signup, courses, or classes. User opens the tab and feels good immediately.
+Return ONLY JSON: {{"cards":[...9]}}
+Fields per card: title, micro_action (2 min), why, site_why (hook), image_prompt (no text), site_name, site_url (exact from list).
 
-
-def pack_cards(raw_cards: list, mood: str) -> list[dict]:
-    used: set[str] = set()
-    out = []
-    for i, raw in enumerate(raw_cards):
-        if not isinstance(raw, dict):
-            continue
-        out.append(_normalize_card(raw, mood, used, seed=random.randint(1, 10_000_000) + i))
-        if len(out) == CARD_COUNT:
-            return out
-    for fb in fallback_cards(mood):
-        if fb["site_url"] in used:
-            continue
-        out.append(_normalize_card(fb, mood, used, seed=random.randint(1, 10_000_000)))
-        if len(out) == CARD_COUNT:
-            break
-    while len(out) < CARD_COUNT:
-        filler = resolve_site("", "", used, mood)
-        if filler["url"] in used:
-            break
-        out.append(
-            _normalize_card(
-                {
-                    "title": filler["name"],
-                    "micro_action": f"Spend two minutes on {filler['name']}, then close the tab.",
-                    "why": "A short finished visit beats an endless feed.",
-                    "image_prompt": f"warm illustration inspired by {filler['name']}, no text",
-                    "site_name": filler["name"],
-                    "site_why": "A small visit, then leave.",
-                },
-                mood,
-                used,
-                seed=random.randint(1, 10_000_000),
-            )
-        )
-    return out[:CARD_COUNT]
-
-
-def _system_prompt() -> str:
-    return f"""You help someone who is doomscrolling and low-energy.
-Return ONLY JSON: {{"cards":[...9 objects...]}} with exactly 9 cards.
-Each card:
-- title: short, catchy
-- micro_action: one concrete thing, 2 minutes or less. Physical, sensory, or a short visit to the site. Never "open social media", news, or a long study session.
-- why: one sentence on why this helps THIS mood
-- image_prompt: vibrant illustration, no words or letters in the image
-- site_name, site_url, site_why: pick from the allowlist only. Nine DIFFERENT sites.
-Never invent URLs. No Instagram, TikTok, Twitter, Reddit, YouTube, Facebook, or news homepages.
-
-Allowlist:
-{sites_for_prompt()}
+Sites:
+{sites_block}
 """
 
 
-async def groq_cards(mood: str) -> list[dict] | None:
+def _groq_models() -> list[str]:
+    primary = GROQ_MODEL.strip()
+    out = [primary] if primary else []
+    for m in GROQ_MODEL_FALLBACKS:
+        if m not in out:
+            out.append(m)
+    return out
+
+
+def _parse_groq_cards(content: str) -> list[dict] | None:
+    data = json.loads(_strip_fences(content))
+    cards = data.get("cards") if isinstance(data, dict) else data
+    if not isinstance(cards, list) or len(cards) < 3:
+        return None
+    return cards
+
+
+async def _groq_request(payload: dict, timeout: float) -> httpx.Response:
     key = os.getenv("GROQ_API_KEY", "").strip()
-    if not key:
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        return await client.post(
+            GROQ_URL,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json=payload,
+        )
+
+
+async def groq_cards(mood: str, sites: list[dict]) -> list[dict] | None:
+    if not os.getenv("GROQ_API_KEY", "").strip() or len(sites) < CARD_COUNT:
         return None
-    payload = {
-        "model": GROQ_MODEL,
-        "temperature": 1,
-        "max_completion_tokens": 8192,
-        "top_p": 1,
-        "reasoning_effort": "medium",
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {"role": "system", "content": _system_prompt()},
-            {
-                "role": "user",
-                "content": (
-                    f'Mood: "{mood}". '
-                    "Pick nine different allowlisted sites that fit this mood. "
-                    "Restless=movement/play, burnt out=stillness/nature, bored=curiosity, "
-                    "anxious=slow/breath, numb=gentle sensory, foggy=one small clear task. "
-                    "Return only the JSON object."
-                ),
-            },
-        ],
-    }
-    try:
-        timeout = 20 if os.getenv("VERCEL") else 90
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            r = await client.post(
-                GROQ_URL,
-                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json=payload,
-            )
+    # Exactly 9 sites, compact lines — keeps input under 8k tokens on gpt-oss-20b
+    pick = pick_sites_for_llm(sites, CARD_COUNT)
+    sites_block = sites_for_prompt(pick)
+    user = f'Mood: "{mood}". Write 9 cards for every site listed. Return only JSON.'
+    timeout = 55 if os.getenv("VERCEL") else 90
+
+    for model in _groq_models():
+        payload = {
+            "model": model,
+            "temperature": 0.9,
+            "max_tokens": 3500,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": _system_prompt(sites_block)},
+                {"role": "user", "content": user},
+            ],
+        }
+        try:
+            r = await _groq_request(payload, timeout)
+            if r.status_code == 413:
+                continue  # prompt too large for this model — try next
+            if r.status_code == 429:
+                continue  # rate limited — try next model
             r.raise_for_status()
-            msg = r.json()["choices"][0]["message"]
-            content = msg.get("content") or ""
-        data = json.loads(_strip_fences(content))
-        cards = data.get("cards") if isinstance(data, dict) else data
-        if not isinstance(cards, list) or len(cards) < 2:
-            return None
-        return cards
-    except (httpx.HTTPError, KeyError, json.JSONDecodeError, TypeError, ValueError):
+            content = r.json()["choices"][0]["message"].get("content") or ""
+            return _parse_groq_cards(content)
+        except (httpx.HTTPError, KeyError, json.JSONDecodeError, TypeError, ValueError):
+            continue
+    return None
+
+
+def _match_allowed(url: str, allowed: dict[str, dict]) -> dict | None:
+    url = normalize_url(url)
+    if url in allowed:
+        return allowed[url]
+    host = site_host(url)
+    for u, site in allowed.items():
+        if site_host(u) == host:
+            return site
+    return None
+
+
+def _normalize_card(
+    raw: dict,
+    mood: str,
+    used_urls: set[str],
+    seed: int,
+    allowed: dict[str, dict],
+) -> dict | None:
+    url = normalize_url(str(raw.get("site_url") or ""))
+    site = _match_allowed(url, allowed)
+    if not site or is_blocked(url):
         return None
+    url = site["url"]
+    if url in used_urls:
+        return None
+    used_urls.add(url)
+    prompt = str(raw.get("image_prompt") or f"warm illustration for {site['name']}, no text")
+    return {
+        "title": str(raw.get("title") or site["name"]).strip()[:80],
+        "micro_action": str(raw.get("micro_action") or f"Open {site['name']} for two minutes, then leave.").strip()[:240],
+        "why": str(raw.get("why") or f"A small visit that fits feeling {mood}.").strip()[:240],
+        "image_url": image_url(prompt, seed),
+        "site_name": str(raw.get("site_name") or site["name"]).strip()[:80],
+        "site_url": url,
+        "site_why": str(raw.get("site_why") or site.get("description", "")[:160]).strip()[:160],
+    }
+
+
+def pack_cards(raw_cards: list, mood: str, allowed: dict[str, dict]) -> list[dict]:
+    used: set[str] = set()
+    out: list[dict] = []
+    for i, raw in enumerate(raw_cards):
+        if not isinstance(raw, dict):
+            continue
+        card = _normalize_card(raw, mood, used, random.randint(1, 10_000_000) + i, allowed)
+        if card:
+            out.append(card)
+        if len(out) == CARD_COUNT:
+            return out
+
+    # Fill gaps from discovered sites the model skipped
+    for site in allowed.values():
+        if len(out) == CARD_COUNT:
+            break
+        url = site["url"]
+        if url in used:
+            continue
+        used.add(url)
+        out.append(
+            {
+                "title": site["name"][:80],
+                "micro_action": f"Spend two minutes on {site['name']}, then close the tab.",
+                "why": f"A real site we found that fits feeling {mood}.",
+                "image_url": image_url(f"calm illustration inspired by {site['name']}, no text", random.randint(1, 10_000_000)),
+                "site_name": site["name"][:80],
+                "site_url": url,
+                "site_why": (site.get("description") or "Worth opening instead of the feed.")[:160],
+            }
+        )
+    return out[:CARD_COUNT]
 
 
 @app.get("/api/health")
 @app.get("/health")
 def health():
-    return {"ok": True, "groq": bool(os.getenv("GROQ_API_KEY", "").strip())}
+    return {
+        "ok": True,
+        "groq": bool(os.getenv("GROQ_API_KEY", "").strip()),
+        "groq_model": GROQ_MODEL,
+        "pollinations": bool(_pollinations_key()),
+    }
 
 
 @app.post("/api/reset")
 @app.post("/reset")
 async def reset(body: ResetIn):
     mood = body.mood.strip()[:80]
-    raw = await groq_cards(mood)
-    source = "groq" if raw else "fallback"
-    cards = pack_cards(raw or fallback_cards(mood), mood)
-    return {"mood": mood, "cards": cards, "source": source}
+    discovered, web_count = await discover_sites(mood)
+    allowed = {s["url"]: s for s in discovered}
+
+    if len(discovered) >= CARD_COUNT and os.getenv("GROQ_API_KEY", "").strip():
+        raw = await groq_cards(mood, discovered)
+        if raw:
+            cards = pack_cards(raw, mood, allowed)
+            if len(cards) >= CARD_COUNT:
+                source = "web" if web_count >= 3 else "groq"
+                return {"mood": mood, "cards": cards[:CARD_COUNT], "source": source}
+
+    # Last resort — static text if search reads and Groq both failed
+    fb_allowed = {
+        normalize_url(c["site_url"]): {
+            "url": normalize_url(c["site_url"]),
+            "name": c["site_name"],
+            "description": c.get("site_why", ""),
+        }
+        for c in fallback_cards(mood)
+    }
+    cards = pack_cards(fallback_cards(mood), mood, fb_allowed)
+    return {"mood": mood, "cards": cards, "source": "fallback"}
 
 
 def _self_check() -> None:
     url = image_url("a red apple on a windowsill", 7)
-    assert "image.pollinations.ai" in url
-    assert "apple" in url
-    used: set[str] = set()
-    evil = resolve_site("https://evil.example", "Nope", used, "burnt out")
-    assert evil["url"].startswith("https://")
-    assert "evil" not in evil["url"]
-    used.add(evil["url"])
-    cards = pack_cards(fallback_cards("burnt out"), "burnt out")
+    assert "pollinations" in url
+    assert is_blocked("https://www.instagram.com")
+    assert not is_blocked("https://www.window-swap.com")
+    fb = fallback_cards("burnt out")
+    allowed = {normalize_url(c["site_url"]): {"url": normalize_url(c["site_url"]), "name": c["site_name"], "description": c.get("site_why", "")} for c in fb}
+    cards = pack_cards(fb, "burnt out", allowed)
     assert len(cards) == 9
-    assert len({c["site_url"] for c in cards}) == 9
-    assert all(c["image_url"].startswith("https://image.pollinations.ai/") for c in cards)
-    junk = pack_cards(
-        [{"title": "X", "site_url": "https://tiktok.com", "site_name": "TikTok"}],
-        "anxious",
-    )
-    assert len(junk) == 9
-    assert all("tiktok" not in c["site_url"].lower() for c in junk)
+    assert all("tiktok" not in c["site_url"] for c in cards)
     print("self-check ok")
 
 

@@ -119,7 +119,11 @@ export default function App() {
           </button>
           {pack ? (
             <p className="source">
-              {pack.source === "groq" ? "Written for this mood" : "From the desk drawer"}
+              {pack.source === "web"
+                ? "Found on the web for you"
+                : pack.source === "groq"
+                  ? "Written fresh for your mood"
+                  : "From the desk drawer"}
             </p>
           ) : null}
         </div>
