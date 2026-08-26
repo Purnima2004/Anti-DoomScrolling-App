@@ -51,6 +51,8 @@ _LOGIN_HINTS = re.compile(
     r"start your course|online course|classroom|lesson plan)\b",
     re.I,
 )
+_LOGIN_PATHS = re.compile(r"/(login|signin|sign-in|signup|register|account)(/|$)", re.I)
+_PASSWORD_FIELD = re.compile(r'type=["\']password["\']', re.I)
 
 _TITLE = re.compile(r"<title[^>]*>([^<]+)</title>", re.I)
 _META_DESC = re.compile(
@@ -114,12 +116,16 @@ def site_host(url: str) -> str:
         return ""
 
 
-def is_blocked(url: str, text: str = "") -> bool:
+def is_blocked(url: str, text: str = "", html: str = "") -> bool:
     host = site_host(url)
     if not host:
         return True
     low = url.lower()
     if any(b in host or b in low for b in BLOCKED):
+        return True
+    if _LOGIN_PATHS.search(urlparse(url).path):
+        return True
+    if html and _PASSWORD_FIELD.search(html):
         return True
     blob = f"{url} {text}".strip()
     return bool(blob and _LOGIN_HINTS.search(blob))
@@ -149,7 +155,7 @@ def _parse_page(html: str) -> tuple[str, str]:
     return title[:120], desc[:320]
 
 
-def _seed_hits(mood: str) -> list[dict]:
+def seed_hits(mood: str) -> list[dict]:
     """Known calm sites for this mood — used when search is rate-limited."""
     key = mood_key(mood)
     tagged = [s for s in SITES if key in s["tags"]]
@@ -211,39 +217,57 @@ async def _fetch_preview(client: httpx.AsyncClient, hit: dict) -> dict | None:
         if r.status_code >= 400:
             return None
         ct = r.headers.get("content-type", "")
-        if "text/html" in ct:
-            title, desc = _parse_page(r.text[:120_000])
+        html = r.text[:120_000] if "text/html" in ct else ""
+        if html:
+            title, desc = _parse_page(html)
         else:
             title, desc = hit.get("name", ""), hit.get("description", "")
         if not title:
             title = hit.get("name") or site_host(url).split(".")[0].replace("-", " ").title()
-        if is_blocked(url, f"{title} {desc}"):
+        final_url = normalize_url(str(r.url))
+        if is_blocked(final_url, f"{title} {desc}", html):
             return None
         return {
-            "url": normalize_url(str(r.url)),
+            "url": final_url,
             "name": title,
             "description": desc or hit.get("description") or "A calm corner of the internet.",
             "from_web": hit.get("from_web", False),
         }
     except (httpx.HTTPError, UnicodeError):
-        if hit.get("name"):
+        # Dead search hits stay out. Seeds we already trust can skip a live read.
+        if not hit.get("from_web") and hit.get("name"):
             return {
                 "url": url,
                 "name": hit["name"],
                 "description": hit.get("description") or "A calm corner of the internet.",
-                "from_web": hit.get("from_web", False),
+                "from_web": False,
             }
         return None
 
 
+def top_up_sites(sites: list[dict], mood: str, n: int = CARD_COUNT) -> list[dict]:
+    """Pad a short list with curated seeds so Groq still gets n sites."""
+    if len(sites) >= n:
+        return sites
+    seen = {normalize_url(s["url"]) for s in sites}
+    extra: list[dict] = []
+    for hit in seed_hits(mood):
+        if hit["url"] in seen:
+            continue
+        extra.append(hit)
+        seen.add(hit["url"])
+        if len(sites) + len(extra) >= n:
+            break
+    return sites + extra
+
+
 async def discover_sites(mood: str, limit: int = 18) -> tuple[list[dict], int]:
-    """Search + seed sites, read live page text. Returns (sites, web_search_count)."""
+    """Search + seed sites, read live page text. Returns (sites, verified web_count)."""
     search_hits = await asyncio.to_thread(_search_sync, mood)
-    web_count = len(search_hits)
 
     merged: list[dict] = []
     seen: set[str] = set()
-    for hit in search_hits + _seed_hits(mood):
+    for hit in search_hits + seed_hits(mood):
         url = hit["url"]
         if url in seen:
             continue
@@ -263,7 +287,9 @@ async def discover_sites(mood: str, limit: int = 18) -> tuple[list[dict], int]:
     # Search hits first, then seeds
     order = {h["url"]: i for i, h in enumerate(merged)}
     previews.sort(key=lambda s: order.get(s["url"], 999))
-    return previews[:limit], web_count
+    previews = previews[:limit]
+    web_count = sum(1 for p in previews if p.get("from_web"))
+    return previews, web_count
 
 
 def sites_for_prompt(sites: list[dict]) -> str:

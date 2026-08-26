@@ -22,6 +22,7 @@ from discover import (
     pick_sites_for_llm,
     site_host,
     sites_for_prompt,
+    top_up_sites,
 )
 from fallbacks import fallback_cards
 
@@ -78,7 +79,8 @@ def _system_prompt(sites_block: str) -> str:
     return f"""Escape Instagram doomscrolling. Pick all 9 sites below (use each once).
 Every site must be open-and-play: no login, signup, courses, or classes. User opens the tab and feels good immediately.
 Return ONLY JSON: {{"cards":[...9]}}
-Fields per card: title, micro_action (2 min), why, site_why (hook), image_prompt (no text), site_name, site_url (exact from list).
+Fields per card: site_index (1-9 from the list), title, micro_action (2 min), why, site_why (hook), image_prompt (no text).
+Do not invent URLs. Use site_index only.
 
 Sites:
 {sites_block}
@@ -112,13 +114,35 @@ async def _groq_request(payload: dict, timeout: float) -> httpx.Response:
         )
 
 
+def _resolve_site_index(raw_cards: list, pick: list[dict]) -> list[dict]:
+    """Map Groq's site_index onto our URLs so a typo can't invent a domain."""
+    by_index = {i: s for i, s in enumerate(pick, 1)}
+    resolved: list[dict] = []
+    for raw in raw_cards:
+        if not isinstance(raw, dict):
+            continue
+        site = None
+        try:
+            site = by_index.get(int(raw.get("site_index")))
+        except (TypeError, ValueError):
+            site = None
+        if not site:
+            url = normalize_url(str(raw.get("site_url") or ""))
+            host = site_host(url)
+            site = next((s for s in pick if s["url"] == url or site_host(s["url"]) == host), None)
+        if not site:
+            continue
+        resolved.append({**raw, "site_url": site["url"], "site_name": site["name"]})
+    return resolved
+
+
 async def groq_cards(mood: str, sites: list[dict]) -> list[dict] | None:
     if not os.getenv("GROQ_API_KEY", "").strip() or len(sites) < CARD_COUNT:
         return None
     # Exactly 9 sites, compact lines — keeps input under 8k tokens on gpt-oss-20b
     pick = pick_sites_for_llm(sites, CARD_COUNT)
     sites_block = sites_for_prompt(pick)
-    user = f'Mood: "{mood}". Write 9 cards for every site listed. Return only JSON.'
+    user = f'Mood: "{mood}". Write 9 cards, one per site_index 1-{len(pick)}. Return only JSON.'
     timeout = 55 if os.getenv("VERCEL") else 90
 
     for model in _groq_models():
@@ -140,7 +164,9 @@ async def groq_cards(mood: str, sites: list[dict]) -> list[dict] | None:
                 continue  # rate limited — try next model
             r.raise_for_status()
             content = r.json()["choices"][0]["message"].get("content") or ""
-            return _parse_groq_cards(content)
+            parsed = _parse_groq_cards(content)
+            if parsed:
+                return _resolve_site_index(parsed, pick)
         except (httpx.HTTPError, KeyError, json.JSONDecodeError, TypeError, ValueError):
             continue
     return None
@@ -234,6 +260,7 @@ def health():
 async def reset(body: ResetIn):
     mood = body.mood.strip()[:80]
     discovered, web_count = await discover_sites(mood)
+    discovered = top_up_sites(discovered, mood, CARD_COUNT)
     allowed = {s["url"]: s for s in discovered}
 
     if len(discovered) >= CARD_COUNT and os.getenv("GROQ_API_KEY", "").strip():
@@ -261,12 +288,19 @@ def _self_check() -> None:
     url = image_url("a red apple on a windowsill", 7)
     assert "pollinations" in url
     assert is_blocked("https://www.instagram.com")
+    assert is_blocked("https://example.com/login")
+    assert is_blocked("https://ok.com", html='<input type="password">')
     assert not is_blocked("https://www.window-swap.com")
     fb = fallback_cards("burnt out")
     allowed = {normalize_url(c["site_url"]): {"url": normalize_url(c["site_url"]), "name": c["site_name"], "description": c.get("site_why", "")} for c in fb}
     cards = pack_cards(fb, "burnt out", allowed)
     assert len(cards) == 9
     assert all("tiktok" not in c["site_url"] for c in cards)
+    resolved = _resolve_site_index(
+        [{"site_index": 1, "title": "x", "micro_action": "y", "why": "z"}],
+        [{"url": "https://www.window-swap.com", "name": "WindowSwap"}],
+    )
+    assert resolved[0]["site_url"] == "https://www.window-swap.com"
     print("self-check ok")
 
 

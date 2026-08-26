@@ -101,6 +101,51 @@ SITES = [
         "url": "https://www.atlasobscura.com",
         "tags": ("bored", "restless"),
     },
+    {
+        "name": "MapCrunch",
+        "url": "https://www.mapcrunch.com",
+        "tags": ("bored", "restless", "numb"),
+    },
+    {
+        "name": "Windy",
+        "url": "https://www.windy.com",
+        "tags": ("foggy", "anxious", "bored"),
+    },
+    {
+        "name": "myNoise",
+        "url": "https://mynoise.net",
+        "tags": ("anxious", "burnt out", "foggy"),
+    },
+    {
+        "name": "Chrome Music Lab",
+        "url": "https://musiclab.chromeexperiments.com",
+        "tags": ("bored", "restless", "foggy"),
+    },
+    {
+        "name": "Mikutap",
+        "url": "https://aidn.jp/mikutap",
+        "tags": ("restless", "bored", "numb"),
+    },
+    {
+        "name": "Zoomquilt",
+        "url": "https://zoomquilt.org",
+        "tags": ("bored", "foggy", "numb"),
+    },
+    {
+        "name": "Koalas to the Max",
+        "url": "https://www.koalastothemax.com",
+        "tags": ("bored", "restless", "numb"),
+    },
+    {
+        "name": "Little Alchemy 2",
+        "url": "https://littlealchemy2.com",
+        "tags": ("bored", "foggy", "restless"),
+    },
+    {
+        "name": "NASA Eyes",
+        "url": "https://eyes.nasa.gov/apps/solar-system/#/home",
+        "tags": ("bored", "numb", "anxious"),
+    },
 ]
 
 SITES_BY_URL = {s["url"].rstrip("/").lower(): s for s in SITES}
