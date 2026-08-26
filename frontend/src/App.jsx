@@ -83,9 +83,6 @@ export default function App() {
       <header className="letterhead">
         <p className="mark">Paper Reset</p>
         <h1>Put the feed down. Pick a mood.</h1>
-        <p className="lede">
-          Nine postcards. A two-minute idea on each. A website that ends when you close the tab.
-        </p>
       </header>
 
       <section className="composer">
@@ -117,15 +114,6 @@ export default function App() {
           <button type="button" className="go" onClick={generate} disabled={loading}>
             {loading ? "Developing…" : pack ? "Another set" : "generate and see the magic"}
           </button>
-          {pack ? (
-            <p className="source">
-              {pack.source === "web"
-                ? "Found on the web for you"
-                : pack.source === "groq"
-                  ? "Written fresh for your mood"
-                  : "From the desk drawer"}
-            </p>
-          ) : null}
         </div>
         {error ? <p className="err">{error}</p> : null}
       </section>

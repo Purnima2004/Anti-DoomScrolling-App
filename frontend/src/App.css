@@ -60,15 +60,8 @@ body {
   font-size: clamp(2rem, 5vw, 3.4rem);
   font-weight: 500;
   line-height: 1.05;
-  margin: 0 0 0.7rem;
+  margin: 0 0 1.4rem;
   max-width: 14ch;
-}
-
-.lede {
-  margin: 0;
-  max-width: 42ch;
-  color: #5a4634;
-  line-height: 1.5;
 }
 
 .composer {
@@ -153,7 +146,6 @@ body {
   cursor: wait;
 }
 
-.source,
 .err,
 .empty {
   color: #6b5340;
